@@ -2,3 +2,7 @@ This code is copyrighted by me, Pjotter Tommassen (p.tommassen@gmail.com), with 
 * In case of commercial usage of the code or any derivative, in any form, I should be credited, as well as notified of its usage using the above mentioned mail-address.
 * In case of non-commercial distribution of the code or any derivative, in any form, I should be credited, as well as notified of its usage using the above mentioned mail-address.
 * In case of any other non-commercial usage (e.g. personal study), I would really appreciate some notification, since I'm curious if it is of some use to someone! ;)
+
+Two libraries not written by me are included, and have different licenses:
+* opencv/ uses the BSD-license and can be found here: http://opencv.org/
+* tesseract/ uses the Apache 2.0 license and can be found here: https://code.google.com/p/tesseract-ocr/
