@@ -30,6 +30,7 @@
 #include <iterator>
 #include <map>
 #include <utility>
+#include <set>
 
 #include "../opencv/native/jni/include/opencv2/core/core.hpp"
 #include "../opencv/native/jni/include/opencv2/core/operations.hpp"
@@ -81,6 +82,8 @@ struct swtRay {
 struct component {
 	std::vector<cv::Point2i> points;
 
+	float meanWidth;
+
 	component() {
 		dirty = false;
 	}
@@ -96,15 +99,42 @@ struct component {
 		return bbox;
 	}
 
+	const cv::Point2i &getCenter() const {
+		if (dirty)
+			update();
+		return center;
+	}
+
+	float getSize() const {
+		if (dirty)
+			update();
+		return size;
+	}
+
 private:
+	cv::Point2i center;
 	cv::Rect bbox;
+	float size;
 	bool dirty;
 	void update() const {
 		component *casted = const_cast<component*>(this);
 		casted->dirty = false;
 		casted->bbox = cv::boundingRect(points);
+		casted->center = cv::Point2i(bbox.x + bbox.size().width / 2,
+				bbox.y + bbox.size().height / 2);
+		casted->size = std::sqrt(
+				bbox.width * bbox.width + bbox.height * bbox.height);
 	}
 };
+
+// helper struct for chain extraction
+struct potentialChain {
+
+	std::set<unsigned int> components;
+	float angle;
+};
+
+typedef std::vector<component> chain;
 
 bool sortSwt(const swtPoint &p1, const swtPoint &p2) {
 	return p1.strokeWidth < p2.strokeWidth;
@@ -398,57 +428,7 @@ std::vector<component> extractComponents(cv::Mat swtImage) {
 
 }
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
-cv::Mat normalize(cv::Mat swtImage) {
-	cv::Mat out(swtImage.size(), CV_8UC1);
-
-	float min = MAXFLOAT;
-	float max = 0.0f;
-	for (int y = 0; y < swtImage.size().height; ++y) {
-		const float *ptr = (const float*) swtImage.ptr(y);
-		for (int x = 0; x < swtImage.size().width; ++x) {
-			if (*ptr > 0) {
-				min = std::min(min, *ptr);
-				max = std::max(max, *ptr);
-			}
-			++ptr;
-		}
-	}
-
-	float diff = max - min;
-	for (int y = 0; y < swtImage.size().height; ++y) {
-		const float *ptrIn = (const float*) swtImage.ptr(y);
-		unsigned char *ptrOut = out.ptr(y);
-		for (int x = 0; x < swtImage.size().width; ++x) {
-
-			if (*ptrIn < 0)
-				*ptrOut = 255;
-			else
-				*ptrOut = ((*ptrIn - min) / diff) * 255.0f;
-
-			++ptrIn;
-			++ptrOut;
-		}
-
-	}
-
-	cv::cvtColor(out, out, CV_GRAY2RGB);
-
-	return out;
-}
-
-cv::Mat drawComponents(cv::Mat img, const std::vector<component> &components) {
-	for (const component & c : components) {
-		cv::rectangle(img, c.getBoundingBox(), cv::Scalar(0, 255, 0));
-	}
-
-	return img;
-}
-
-bool filterComponent(cv::Mat img, const component & c) {
+bool filterComponent(cv::Mat img, component & c) {
 	// filters the components based their geometric properties; returns true if the component should be filtered
 
 	// first, verify its size; ditch components that are too big or too small
@@ -492,7 +472,7 @@ bool filterComponent(cv::Mat img, const component & c) {
 	// we can already check for occupation ratio, so do so
 	float occupationRatio = (float) occupyCount / (float) componentSize;
 	if (occupationRatio < 0.1) {
-		__android_log_print(ANDROID_LOG_DEBUG, "OCR", "Occupation ditch %",
+		__android_log_print(ANDROID_LOG_DEBUG, "OCR", "Occupation ditch %f",
 				occupationRatio);
 		return true;
 	}
@@ -519,6 +499,9 @@ bool filterComponent(cv::Mat img, const component & c) {
 		return true;
 	}
 
+	// this is used later during chain generation, so store it here
+	c.meanWidth = meanWidth;
+
 	return false;
 }
 
@@ -529,6 +512,203 @@ void filterComponents(cv::Mat img, std::vector<component> &components) {
 		else
 			++it;
 }
+
+bool isPotentialPair(const component &c1, const component &c2) {
+
+	// the mean stroke width of both components should be similar
+	float swtRatio = std::max(c1.meanWidth / c2.meanWidth,
+			c2.meanWidth / c1.meanWidth);
+	if (swtRatio > 2.0)
+		return false;
+
+	// the size of the components should be similar
+	float s1 = c1.getSize();
+	float s2 = c2.getSize();
+	float sizeRatio = std::max(s1 / s2, s2 / s1);
+	if (sizeRatio > 2.5)
+		return false;
+
+	// the components should be near each other
+	cv::Point2i center1 = c1.getCenter();
+	cv::Point2i center2 = c2.getCenter();
+	cv::Point2i relative = center2 - center1;
+	float distance = std::sqrt(
+			relative.x * relative.x + relative.y * relative.y);
+	if (distance > 0.8 * (s1 + s2))
+		return false;
+
+
+	__android_log_print(ANDROID_LOG_DEBUG, "OCR", "Paired! swt: %f size: %f distance: %f size1: %f size2: %f", swtRatio, sizeRatio, distance, s1,s2);
+
+
+	return true;
+}
+
+float calculateSimilarity(const potentialChain& chain1,
+		const potentialChain &chain2) {
+	bool found = false;
+	for (unsigned int c1 : chain1.components)
+		for (unsigned int c2 : chain2.components)
+			if (c1 == c2) {
+				found = true;
+				break;
+			}
+	if (!found)
+		return 0;
+
+	float angleDiff = std::abs(chain1.angle - chain2.angle);
+
+	if (angleDiff >= M_PI / 16)
+		return 0;
+	float So = 1 - (angleDiff / (M_PI / 2));
+
+	int c1 = std::abs(chain1.components.size() - chain2.components.size());
+	int c2 = chain1.components.size() + chain2.components.size();
+	float Sp = (float) c1 / c2;
+
+	float sigma = 0.5 * So + 0.5 * Sp;
+
+	return sigma;
+}
+
+std::vector<chain> chainComponents(const std::vector<component> &components) {
+
+	std::vector<potentialChain> chains;
+
+	__android_log_print(ANDROID_LOG_DEBUG, "OCR", "Start pairing %d components",
+			components.size());
+
+	// tries to build chains of components that are supposedly part of the same word
+	// first, pair the components if they are potentially part of the same word
+	for (int i = 0; i < components.size(); ++i)
+		for (int j = i + 1; j < components.size(); ++j)
+			if (isPotentialPair(components[i], components[j])) {
+				potentialChain chain;
+				chain.components.insert(i);
+				chain.components.insert(j);
+
+				// calculate angle of vector between components and (0, -1)
+				double dx = components[j].getCenter().x
+						- components[i].getCenter().x;
+				double dy = components[j].getCenter().y
+						- components[i].getCenter().y;
+				chain.angle = -dy / sqrt((dx * dx + dy * dy) + 1e-10);
+
+				chains.push_back(chain);
+			}
+
+	__android_log_print(ANDROID_LOG_DEBUG, "OCR", "Paired %d chains",
+			chains.size());
+
+	// then, try and find the most sensible pairs
+	std::vector<bool> dropped(chains.size(), false);
+	float maxSimilarity;
+	do {
+		maxSimilarity = 0;
+		std::pair<unsigned int, unsigned int> bestPair;
+
+		for (int i = 0; i < chains.size(); ++i)
+			if (!dropped[i])
+				for (int j = i + 1; j < chains.size(); ++j)
+					if (!dropped[j]) {
+						float similarity = calculateSimilarity(chains[i],
+								chains[j]);
+						if (similarity > maxSimilarity) {
+							maxSimilarity = similarity;
+							bestPair = std::pair<unsigned int, unsigned int>(i,
+									j);
+						}
+					}
+
+		if (maxSimilarity > 0) {
+			potentialChain &chain1 = chains[bestPair.first];
+			potentialChain &chain2 = chains[bestPair.second];
+			dropped[bestPair.first] = true;
+			chain2.components.insert(chain1.components.begin(),
+					chain1.components.end());
+		}
+
+	} while (!chains.empty() && maxSimilarity > 0);
+
+	// yay, potential chains! make them into actual ones! ;)
+	std::vector<chain> result;
+	for (int i = 0; i < chains.size(); ++i)
+		if (!dropped[i]) {
+			chain ch;
+			for (unsigned int comp : chains[i].components)
+				ch.push_back(components[comp]);
+
+			result.push_back(ch);
+		}
+
+	__android_log_print(ANDROID_LOG_DEBUG, "OCR", "Resulted in %d chains",
+			result.size());
+
+	return result;
+
+}
+
+////////// for debugging output; not part of the algorithm
+
+cv::Mat normalize(cv::Mat swtImage) {
+	cv::Mat out(swtImage.size(), CV_8UC1);
+
+	float min = MAXFLOAT;
+	float max = 0.0f;
+	for (int y = 0; y < swtImage.size().height; ++y) {
+		const float *ptr = (const float*) swtImage.ptr(y);
+		for (int x = 0; x < swtImage.size().width; ++x) {
+			if (*ptr > 0) {
+				min = std::min(min, *ptr);
+				max = std::max(max, *ptr);
+			}
+			++ptr;
+		}
+	}
+
+	float diff = max - min;
+	for (int y = 0; y < swtImage.size().height; ++y) {
+		const float *ptrIn = (const float*) swtImage.ptr(y);
+		unsigned char *ptrOut = out.ptr(y);
+		for (int x = 0; x < swtImage.size().width; ++x) {
+
+			if (*ptrIn < 0)
+				*ptrOut = 255;
+			else
+				*ptrOut = ((*ptrIn - min) / diff) * 255.0f;
+
+			++ptrIn;
+			++ptrOut;
+		}
+
+	}
+
+	cv::cvtColor(out, out, CV_GRAY2RGB);
+
+	return out;
+}
+
+cv::Mat drawComponents(cv::Mat img, const std::vector<component> &components) {
+	for (const component & c : components) {
+		cv::rectangle(img, c.getBoundingBox(), cv::Scalar(0, 0, 255));
+	}
+
+	return img;
+}
+
+cv::Mat drawChains(cv::Mat mat, const std::vector<chain> &chains) {
+	for (const chain & ch : chains) {
+		for (int i = 1; i < ch.size(); ++i) {
+			cv::line(mat, ch[i - 1].getCenter(), ch[i].getCenter(),
+					cv::Scalar(0, 255, 0));
+		}
+	}
+	return mat;
+}
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 void Java_com_pjottersstuff_ocrdemo_OCRProcessor_processImage(JNIEnv *env,
 		jobject object, jstring filename) {
@@ -547,9 +727,13 @@ void Java_com_pjottersstuff_ocrdemo_OCRProcessor_processImage(JNIEnv *env,
 
 	filterComponents(mat, components);
 
+	std::vector<chain> chains = chainComponents(components);
+
 	mat = normalize(mat);
 
 	mat = drawComponents(mat, components);
+
+	mat = drawChains(mat, chains);
 
 	cv::imwrite(str, mat);
 

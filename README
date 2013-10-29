@@ -5,7 +5,7 @@ This project is a proof of concept/demo code of an OCR-implementation in Android
 For those not interested in the presentation, it is basically an implementation of the following articles:
 * B. Epshtein, E. Ofek, and Y. Wexler. Detecting text in natural scenes with stroke width transform. In Proc. CVPR, 2010.
 * Cong Yao, Xiang Bai, Wenyu Liu, Yi Ma, Zhuowen Tu. Detecting Texts of Arbitrary Orientations in Natural Images. In Proc. CVPR, 2012.
-(though the latter one is only implemented partially)
+(though the latter one is only implemented partially; characteristic scales aren't used, and the rest of the algorithm is updated to take this into account)
 
 This is most definitely not the implementation mentioned during the presentation (since that one was built for a customer and therefore NDA'ed and copyrighted and such), but a reimplementation I did during my spare time. To prevent any resemblance to the original code, I skipped quite a lot of optimizations as well as basic code structuring, so this is far from production ready, and not a representation of my coding capabilities.. :'). However, it should be legible and usable as a starting point for your own implementations.
 
