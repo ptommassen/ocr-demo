@@ -4,6 +4,7 @@ import java.io.File;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 
 import android.app.Activity;
 import android.content.Intent;
@@ -15,6 +16,7 @@ import android.provider.MediaStore;
 import android.view.View;
 import android.view.View.OnClickListener;
 import android.widget.ImageView;
+import android.widget.Toast;
 
 import com.pjottersstuff.ocr_demo.R;
 
@@ -57,11 +59,18 @@ public class CameraActivity extends Activity {
 		if (requestCode == TAKE_IMAGE_REQUEST_CODE && resultCode == RESULT_OK
 				&& _image != null) {
 
-			AsyncTask<Void, Void, Void> task = new OCRProcessor(
+			Toast.makeText(getBaseContext(), "Started processing",
+					Toast.LENGTH_LONG).show();
+
+			AsyncTask<Void, Void, List<String>> task = new OCRProcessor(this,
 					_image.getAbsolutePath()) {
 				@Override
-				protected void onPostExecute(Void result) {
+				protected void onPostExecute(List<String> result) {
 					_imageView.setImageURI(Uri.fromFile(_image));
+
+					for (String str : result)
+						Toast.makeText(getBaseContext(), "OCRed: " + str,
+								Toast.LENGTH_LONG).show();
 				}
 			};
 			task.execute();

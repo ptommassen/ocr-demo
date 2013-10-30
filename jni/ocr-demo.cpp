@@ -6,6 +6,7 @@
 
 #include "opencv2/highgui/highgui.hpp"
 #include "opencv2/imgproc/imgproc.hpp"
+#include "tesseract/baseapi.h"
 
 // largest side in image that is actually processed
 #define MAX_IMAGE_EDGE 640
@@ -17,7 +18,7 @@
 
 // swt settings
 #define SWT_TRACE_STEP_SCALE 0.2f
-
+#define SWT_MAX_STROKE_WIDTH 40 // drop rays longer than this, because they are probably caused by leaks in de edges
 // comment this out if you're expecting to find light text on a dark background; if enabled, only dark text on a light background will be detected
 #define SWT_DARK_ON_LIGHT 1
 
@@ -250,6 +251,13 @@ cv::Mat swt(cv::Mat mat) {
 							__android_log_print(ANDROID_LOG_DEBUG, "OCR",
 									"Finish trace at %dx%d due to leaving image",
 									intTraceCoords[0], intTraceCoords[1]);
+							break;
+						}
+
+						if (ray.points.size() > SWT_MAX_STROKE_WIDTH) {
+							__android_log_print(ANDROID_LOG_DEBUG, "OCR",
+									"Drop ray because it was longer than %d",
+									SWT_MAX_STROKE_WIDTH);
 							break;
 						}
 
@@ -537,9 +545,9 @@ bool isPotentialPair(const component &c1, const component &c2) {
 	if (distance > 0.8 * (s1 + s2))
 		return false;
 
-
-	__android_log_print(ANDROID_LOG_DEBUG, "OCR", "Paired! swt: %f size: %f distance: %f size1: %f size2: %f", swtRatio, sizeRatio, distance, s1,s2);
-
+	__android_log_print(ANDROID_LOG_DEBUG, "OCR",
+			"Paired! swt: %f size: %f distance: %f size1: %f size2: %f",
+			swtRatio, sizeRatio, distance, s1, s2);
 
 	return true;
 }
@@ -624,8 +632,12 @@ std::vector<chain> chainComponents(const std::vector<component> &components) {
 			potentialChain &chain1 = chains[bestPair.first];
 			potentialChain &chain2 = chains[bestPair.second];
 			dropped[bestPair.first] = true;
+			float ratio = (float) chain1.components.size()
+					/ (chain1.components.size() + chain2.components.size());
+			chain2.angle = chain1.angle * ratio + chain2.angle * (1.0 - ratio);
 			chain2.components.insert(chain1.components.begin(),
 					chain1.components.end());
+
 		}
 
 	} while (!chains.empty() && maxSimilarity > 0);
@@ -706,12 +718,36 @@ cv::Mat drawChains(cv::Mat mat, const std::vector<chain> &chains) {
 	return mat;
 }
 
+cv::Mat extractChain(cv::Mat mat, const chain & chain) {
+	cv::vector<cv::Point2i> contour;
+	for (const component & component : chain) {
+		contour.push_back(component.getBoundingBox().tl());
+		contour.push_back(component.getBoundingBox().br());
+	}
+
+	cv::Rect rect = cv::boundingRect(contour);
+	if (rect.x < 0)
+		rect.x = 0;
+	if (rect.y < 0)
+		rect.y = 0;
+	if (rect.width + rect.x >= mat.size().width)
+		rect.width = mat.size().width - rect.x - 1;
+	if (rect.height + rect.y >= mat.size().height)
+		rect.height = mat.size().height - rect.y - 1;
+
+	cv::Mat extracted = mat(rect);
+
+	cv::cvtColor(extracted, extracted, CV_RGB2GRAY);
+	cv::threshold(extracted, extracted, 254, 255, CV_THRESH_BINARY);
+	return extracted;
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-void Java_com_pjottersstuff_ocrdemo_OCRProcessor_processImage(JNIEnv *env,
-		jobject object, jstring filename) {
+jobjectArray Java_com_pjottersstuff_ocrdemo_OCRProcessor_processImage(
+		JNIEnv *env, jobject object, jstring filename, jstring datapath) {
 
 	const char * str = env->GetStringUTFChars(filename, nullptr);
 	cv::Mat mat = cv::imread(str, CV_LOAD_IMAGE_COLOR);
@@ -731,16 +767,94 @@ void Java_com_pjottersstuff_ocrdemo_OCRProcessor_processImage(JNIEnv *env,
 
 	mat = normalize(mat);
 
+	std::vector<std::string> results;
+
+	if (!chains.empty()) {
+		const char * cstr = env->GetStringUTFChars(datapath, nullptr);
+		std::string tessDataPath(cstr);
+		env->ReleaseStringUTFChars(datapath, cstr);
+
+		__android_log_print(ANDROID_LOG_DEBUG, "OCR-DEMO",
+				"Looking for tesseract in %s", tessDataPath.c_str());
+
+		GenericVector<STRING> pars_vec;
+		pars_vec.push_back("load_system_dawg");
+		pars_vec.push_back("tessedit_char_whitelist");
+
+		pars_vec.push_back("load_freq_dawg");
+		pars_vec.push_back("load_punc_dawg");
+		pars_vec.push_back("load_number_dawg");
+		pars_vec.push_back("load_unambig_dawg");
+		pars_vec.push_back("load_bigram_dawg");
+		pars_vec.push_back("load_fixed_length_dawgs");
+
+		GenericVector<STRING> pars_values;
+		pars_values.push_back("F");
+		pars_values.push_back("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnopqrstuvwxyz");
+		pars_values.push_back("F");
+		pars_values.push_back("F");
+		pars_values.push_back("F");
+		pars_values.push_back("F");
+		pars_values.push_back("F");
+		pars_values.push_back("F");
+
+		setenv("TESSDATA_PREFIX", tessDataPath.c_str(), 1);
+
+		tesseract::TessBaseAPI *tesseract = new tesseract::TessBaseAPI();
+		if (tesseract->Init((tessDataPath + "/tessdata").c_str(), "eng",
+				tesseract::OEM_DEFAULT, NULL, 0, &pars_vec, &pars_values,
+				false)) {
+			__android_log_print(ANDROID_LOG_DEBUG, "OCR-DEMO",
+					"Could not initialize tesseract!");
+			return nullptr;
+		}
+		tesseract->SetPageSegMode(tesseract::PSM_AUTO);
+
+		for (const chain &chain : chains) {
+			cv::Mat extracted = extractChain(mat, chain);
+
+			tesseract->SetImage((uchar*) extracted.data, extracted.size().width,
+					extracted.size().height, 1, extracted.step1());
+
+			tesseract->Recognize(0);
+
+			char *out = tesseract->GetUTF8Text();
+			std::string s;
+			for (int i = 0; out[i]; ++i)
+				if (out[i] != '\n')
+					s += out[i];
+			delete[] out;
+
+			__android_log_print(ANDROID_LOG_DEBUG, "OCR-DEMO",
+					"Found text %s (%d)", s.c_str(), s.length());
+
+			if (s.length() > 3)
+				results.push_back(s);
+
+		}
+
+		delete tesseract;
+	}
+
 	mat = drawComponents(mat, components);
 
 	mat = drawChains(mat, chains);
-
-	cv::imwrite(str, mat);
+	imwrite(str, mat);
 
 	__android_log_print(ANDROID_LOG_DEBUG, "OCR-DEMO", "Logtest! %s %dx%d", str,
 			mat.size().width, mat.size().height);
 
 	env->ReleaseStringUTFChars(filename, str);
+
+	jobjectArray returns = (jobjectArray) env->NewObjectArray(results.size(),
+			env->FindClass("java/lang/String"), env->NewStringUTF(""));
+
+	for (int i = 0; i < results.size(); ++i) {
+		env->SetObjectArrayElement(returns, i,
+				env->NewStringUTF(results[i].c_str()));
+	}
+
+	return returns;
 }
 
 #ifdef __cplusplus
