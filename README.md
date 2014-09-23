@@ -14,6 +14,9 @@ This is most definitely not the implementation mentioned during the presentation
 
 The usage of the application is quite boring; start the application, press the 'Take Picture' button, and snap a picture. OCR processing should start, and a picture of the analyzed result will be returned, as well as the recognized text blocks in Toast messages.
 
+Note that the application requires Android's NDK to function (see [https://developer.android.com/tools/sdk/ndk/index.html]). If you get an error like 'java.lang.UnsatisfiedLinkError: Couldn't load lept from loader dalvik.system.PathClassLoader' when running the application, either Eclipse didn't pick up your NDK, or you didn't run 'ndk-build' in the project's directory.
+
+
 The accuracy of the OCR algorithm isn't entirely up to snuff. I'm not sure I can improve it too much without breaking a NDA or something, but here are a few pointers to get you started, in case you want to use this code:
 * chainComponents sometimes tries to link two lines of text, while it should only consider characters in the same line.
 * Tesseract tries really hard to recognize ANYTHING, meaning that random noise will be recognized as punctuation marks. Since this is rather silly, I fed a whitelist containing only alphanumerics to tesseract. However, it is possible to remove most of the noise.
